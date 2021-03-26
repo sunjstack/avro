@@ -88,6 +88,7 @@ class CodeGen {
     const bool noUnion_;
     const std::string guardString_;
     boost::mt19937 random_;
+    const bool noResolvingDecoder_;
 
     vector<PendingSetterGetter> pendingGettersAndSetters;
     vector<PendingConstructor> pendingConstructors;
@@ -114,10 +115,12 @@ public:
     CodeGen(std::ostream& os, std::string  ns,
         std::string  schemaFile, std::string  headerFile,
         std::string  guardString,
-        std::string  includePrefix, bool noUnion) :
+        std::string  includePrefix, bool noUnion,
+        bool noResolvingDecoder) :
         unionNumber_(0), os_(os), inNamespace_(false), ns_(std::move(ns)),
         schemaFile_(std::move(schemaFile)), headerFile_(std::move(headerFile)),
         includePrefix_(std::move(includePrefix)), noUnion_(noUnion),
+        noResolvingDecoder_(noResolvingDecoder),
         guardString_(std::move(guardString)),
         random_(static_cast<uint32_t>(::time(nullptr))) { }
     void generate(const ValidSchema& schema);
@@ -584,34 +587,43 @@ void CodeGen::generateRecordTraits(const NodePtr& n)
 
     os_ << "    }\n"
         << "    static void decode(Decoder& d, " << fn << "& v) {\n";
-    os_ << "        if (avro::ResolvingDecoder *rd =\n";
-    os_ << "            dynamic_cast<avro::ResolvingDecoder *>(&d)) {\n";
-    os_ << "            const std::vector<size_t> fo = rd->fieldOrder();\n";
-    os_ << "            for (std::vector<size_t>::const_iterator it = fo.begin();\n";
-    os_ << "                it != fo.end(); ++it) {\n";
-    os_ << "                switch (*it) {\n";
-    for (size_t i = 0; i < c; ++i) {
-        // the nameAt(i) does not take c++ reserved words into account
-        // so we need to call decorate on it
-        std::string decoratedNameAt = decorate(n->nameAt(i));
-        os_ << "                case " << i << ":\n";
-        os_ << "                    avro::decode(d, v." << decoratedNameAt << ");\n";
-        os_ << "                    break;\n";
-    }
-    os_ << "                default:\n";
-    os_ << "                    break;\n";
-    os_ << "                }\n";
-    os_ << "            }\n";
-    os_ << "        } else {\n";
+    if (! noResolvingDecoder_) {  
+        os_ << "        if (avro::ResolvingDecoder *rd =\n";
+        os_ << "            dynamic_cast<avro::ResolvingDecoder *>(&d)) {\n";
+        os_ << "            const std::vector<size_t> fo = rd->fieldOrder();\n";
+        os_ << "            for (std::vector<size_t>::const_iterator it = fo.begin();\n";
+	os_ << "                it != fo.end(); ++it) {\n";
+	os_ << "                switch (*it) {\n";
+	for (size_t i = 0; i < c; ++i) {
+	    // the nameAt(i) does not take c++ reserved words into account
+	    // so we need to call decorate on it
+	    std::string decoratedNameAt = decorate(n->nameAt(i));
+	    os_ << "                case " << i << ":\n";
+	    os_ << "                    avro::decode(d, v." << decoratedNameAt << ");\n";
+	    os_ << "                    break;\n";
+	}
+	os_ << "                default:\n";
+	os_ << "                    break;\n";
+	os_ << "                }\n";
+	os_ << "            }\n";
+	os_ << "        } else {\n";
 
-    for (size_t i = 0; i < c; ++i) {
-        // the nameAt(i) does not take c++ reserved words into account
-        // so we need to call decorate on it
-        std::string decoratedNameAt = decorate(n->nameAt(i));
-        os_ << "            avro::decode(d, v." << decoratedNameAt << ");\n";
+        for (size_t i = 0; i < c; ++i) {
+            // the nameAt(i) does not take c++ reserved words into account
+	    // so we need to call decorate on it
+	    std::string decoratedNameAt = decorate(n->nameAt(i));
+	    os_ << "            avro::decode(d, v." << decoratedNameAt << ");\n";
+	}
+        os_ << "        }\n";
     }
-    os_ << "        }\n";
-
+    else {
+        for (size_t i = 0; i < c; ++i) {
+            // the nameAt(i) does not take c++ reserved words into account
+	    // so we need to call decorate on it
+	    std::string decoratedNameAt = decorate(n->nameAt(i));
+	    os_ << "        avro::decode(d, v." << decoratedNameAt << ");\n";
+	}
+    }
     os_ << "    }\n"
         << "};\n\n";
 }
@@ -838,6 +850,7 @@ int main(int argc, char** argv)
     const string IN("input");
     const string INCLUDE_PREFIX("include-prefix");
     const string NO_UNION_TYPEDEF("no-union-typedef");
+    const string NO_RESOLVING_DECODER("no-resolving-decoder");
 
     po::options_description desc("Allowed options");
     desc.add_options()
@@ -847,7 +860,8 @@ int main(int argc, char** argv)
         ("no-union-typedef,U", "do not generate typedefs for unions in records")
         ("namespace,n", po::value<string>(), "set namespace for generated code")
         ("input,i", po::value<string>(), "input file")
-        ("output,o", po::value<string>(), "output file to generate");
+        ("output,o", po::value<string>(), "output file to generate")
+        ("no-resolving-decoder,D", "set no resolving decoder for generated code");
 
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -864,6 +878,7 @@ int main(int argc, char** argv)
     string inf = vm.count(IN) > 0 ? vm[IN].as<string>() : string();
     string incPrefix = vm[INCLUDE_PREFIX].as<string>();
     bool noUnion = vm.count(NO_UNION_TYPEDEF) != 0;
+    bool noResolvingDecoder = vm.count(NO_RESOLVING_DECODER) != 0;
     if (incPrefix == "-") {
         incPrefix.clear();
     } else if (*incPrefix.rbegin() != '/') {
@@ -883,9 +898,9 @@ int main(int argc, char** argv)
         if (! outf.empty()) {
             string g = readGuard(outf);
             ofstream out(outf.c_str());
-            CodeGen(out, ns, inf, outf, g, incPrefix, noUnion).generate(schema);
+            CodeGen(out, ns, inf, outf, g, incPrefix, noUnion, noResolvingDecoder).generate(schema);
         } else {
-            CodeGen(std::cout, ns, inf, outf, "", incPrefix, noUnion).
+            CodeGen(std::cout, ns, inf, outf, "", incPrefix, noUnion, noResolvingDecoder).
                 generate(schema);
         }
         return 0;
